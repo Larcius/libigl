@@ -4,7 +4,7 @@ project(libigl_tutorials)
 ### libIGL options: choose between header only and compiled static library
 option(LIBIGL_USE_STATIC_LIBRARY "Use LibIGL as static library" ON)
 option(LIBIGL_WITH_VIEWER      "Use OpenGL viewer"  ON)
-option(LIBIGL_WITH_NANOGUI     "Use Nanogui menu"   OFF)
+option(LIBIGL_WITH_NANOGUI     "Use Nanogui menu"   ON)
 
 ### libIGL options: choose your dependencies (by default everything is OFF, in this example we need the viewer) ###
 option(LIBIGL_WITH_BBW              "Use BBW"            ON)
@@ -22,6 +22,7 @@ option(LIBIGL_WITH_PNG              "Use PNG"            ON)
 option(LIBIGL_WITH_TETGEN           "Use Tetgen"         ON)
 option(LIBIGL_WITH_TRIANGLE         "Use Triangle"       ON)
 option(LIBIGL_WITH_XML              "Use XML"            ON)
+option(LIBIGL_WITH_ABF_FROM_BLENDER              "Use blender for ABF"            ON)
 ### End   to be tested ----
 
 ### libIGL options: decide if you want to use the functionalities that depends on cgal
@@ -137,6 +138,10 @@ if(TUTORIALS_CHAPTER5)
   add_subdirectory("508_ConjugateField")
   add_subdirectory("509_Planarization")
   add_subdirectory("510_Integrable")
+  if(LIBIGL_WITH_ABF_FROM_BLENDER)
+    add_subdirectory("511_ABFParam")
+	add_subdirectory("512_ParamCompare")
+  endif()
 endif()
 
 # Chapter 6

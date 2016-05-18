@@ -19,6 +19,7 @@ option(LIBIGL_WITH_TETGEN           "Use Tetgen"         OFF)
 option(LIBIGL_WITH_TRIANGLE         "Use Triangle"       OFF)
 option(LIBIGL_WITH_VIEWER           "Use OpenGL viewer"  OFF)
 option(LIBIGL_WITH_XML              "Use XML"            OFF)
+option(LIBIGL_WITH_ABF_FROM_BLENDER              "Use blender for ABF"            OFF)
 
 
 ### Compilation configuration ###
@@ -97,6 +98,23 @@ if(LIBIGL_USE_STATIC_LIBRARY)
   list(APPEND LIBIGL_LIBRARIES "igl")
 endif()
 
+### Compile the blender (abf) part ###
+if(LIBIGL_WITH_ABF_FROM_BLENDER)
+  set(BLENDER_DIR "${LIBIGL_EXTERNAL}/blender")
+  add_subdirectory("${BLENDER_DIR}" "blender")
+  list(APPEND LIBIGL_INCLUDE_DIRS "${BLENDER_DIR}")
+  list(APPEND LIBIGL_EXTRA_LIBRARIES "bf_editor_uvedit")
+  if(LIBIGL_USE_STATIC_LIBRARY)
+    CompileIGL_Module_Copyleft("blender")
+	target_link_libraries(iglblender bf_blenlib)
+	target_link_libraries(iglblender bf_editor_uvedit)
+	target_link_libraries(iglblender bf_intern_guardedalloc)
+    target_include_directories(iglblender PRIVATE ${BLENDER_DIR})
+    target_include_directories(iglblender PRIVATE ${BLENDER_DIR}/source/blender/blenlib)
+    #target_include_directories(iglblender PRIVATE ${BLENDER_DIR}/source/blender/blenlib/intern)
+    #target_include_directories(iglblender PRIVATE ${BLENDER_DIR}/source/blender/editors/uvedit)
+  endif()
+endif()
 
 ### Compile the AntTweakBar part ###
 if(LIBIGL_WITH_ANTTWEAKBAR)

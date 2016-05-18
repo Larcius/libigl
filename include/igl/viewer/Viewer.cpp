@@ -59,6 +59,7 @@
 #include <igl/adjacency_list.h>
 #include <igl/writeOBJ.h>
 #include <igl/writeOFF.h>
+#include <igl/writeSVG.h>
 #include <igl/massmatrix.h>
 #include <igl/file_dialog_open.h>
 #include <igl/file_dialog_save.h>
@@ -441,11 +442,12 @@ namespace viewer
       return false;
     }
     std::string extension = mesh_file_name_string.substr(last_dot+1);
-    if (extension == "off" || extension =="OFF")
+	std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+    if (extension == "off")
     {
       return igl::writeOFF(mesh_file_name_string,data.V,data.F);
     }
-    else if (extension == "obj" || extension =="OBJ")
+    else if (extension == "obj")
     {
       Eigen::MatrixXd corner_normals;
       Eigen::MatrixXi fNormIndices;
@@ -456,6 +458,10 @@ namespace viewer
       return igl::writeOBJ(mesh_file_name_string, data.V,
           data.F, corner_normals, fNormIndices, UV_V, UV_F);
     }
+	else if (extension == "svg")
+	{
+		return igl::writeSVG(mesh_file_name_string, data.V, data.F);
+	}
     else
     {
       // unrecognized file type
@@ -561,7 +567,7 @@ namespace viewer
 
   IGL_INLINE bool Viewer::mouse_down(MouseButton button,int modifier)
   {
-    // Remember mouse location at down even if used by callback/plugin
+    // Remember mouse location at down event if used by callback/plugin
     down_mouse_x = current_mouse_x;
     down_mouse_y = current_mouse_y;
 

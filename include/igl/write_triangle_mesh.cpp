@@ -10,6 +10,7 @@
 #include "writeMESH.h"
 #include "writeOBJ.h"
 #include "writeOFF.h"
+#include "writeSVG.h"
 #include "writePLY.h"
 #include "writeSTL.h"
 #include "writeWRL.h"
@@ -42,6 +43,10 @@ IGL_INLINE bool igl::write_triangle_mesh(
   {
     assert(ascii && ".off only supports ascii");
     return writeOFF(str,V,F);
+  }else if (e == "svg")
+  {
+	  assert(ascii && ".svg only supports ascii");
+	  return writeSVG(str, V, F);
   }else if(e == "ply")
   {
     return writePLY(str,V,F,ascii);

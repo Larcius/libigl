@@ -250,8 +250,10 @@ template <
 
 		double area_diff = area_uv / total_area_uv - area / total_area;
 		
-		distortion += area_diff * area_diff;
+		distortion += area_diff * area_diff * area;
 	}
+
+	distortion /= total_area;
 
 	return sqrt(distortion);
 }
@@ -284,7 +286,6 @@ template <
 
 	double area = 0;
 
-	// works for convex polygons
 	for (unsigned int v_index = 1; v_index < colsF - 1; v_index++) {
 		area += p_area(vec_v[0], vec_v[v_index], vec_v[v_index + 1]);
 	}
@@ -452,16 +453,12 @@ inline double p_area(std::vector<double> v1, std::vector<double> v2, std::vector
 		d2[2] = 0;
 	}
 
-	if (v1.size() == 2) {
-		return 0.5 * abs(cross_product2(d1, d2));
-	}
-	else {
-		double cross[3];
-		cross_product3(d1, d2, cross);
+	double cross[3];
+	cross_product3(d1, d2, cross);
 
-		return 0.5 * norm_v3(cross);
-	}
+	return 0.5 * norm_v3(cross);
 }
+
 template <
 	typename DerivedV,
 	typename DerivedF>

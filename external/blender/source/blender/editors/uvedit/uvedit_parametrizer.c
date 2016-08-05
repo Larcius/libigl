@@ -35,7 +35,6 @@
 #include "BLI_boxpack2d.h"
 #include "BLI_convexhull2d.h"
 
-// NEW
 #include "BLI_stack.h"
 
 #include "uvedit_parametrizer.h"
@@ -44,6 +43,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "BLI_sys_types.h"  /* for intptr_t support */
 
@@ -157,8 +157,9 @@ enum PVertFlag {
 	PVERT_INTERIOR = 4,
 	PVERT_COLLAPSE = 8,
 	PVERT_SPLIT = 16,
-	// NEW
-	PVERT_ABF_SET = 32
+	PVERT_ABF_SET = 32,
+	PVERT_FILLED = 64,	// in case the vertex was introduced due to fill a hole
+	PVERT_BOUNDARY = 128
 };
 
 enum PEdgeFlag {
@@ -170,7 +171,9 @@ enum PEdgeFlag {
 	PEDGE_FILLED = 32,
 	PEDGE_COLLAPSE = 64,
 	PEDGE_COLLAPSE_EDGE = 128,
-	PEDGE_COLLAPSE_PAIR = 256
+	PEDGE_COLLAPSE_PAIR = 256,
+	PEDGE_INTERIOR = 512,
+	PEDGE_BOUNDARY = 1024
 };
 
 /* for flipping faces */
@@ -180,7 +183,6 @@ enum PFaceFlag {
 	PFACE_CONNECTED = 1,
 	PFACE_FILLED = 2,
 	PFACE_COLLAPSE = 4,
-	// NEW
 	PFACE_ABF_SET = 8
 };
 
@@ -206,11 +208,6 @@ typedef struct PChart {
 			double rescale, area;
 			double size[2] /* , trans[2] */;
 		} pack;
-		/* <-- NEW */
-		struct PChartAbf {
-			double *alpha;
-		} abf;
-		/* --> */
 	} u;
 
 	unsigned char flag;
@@ -246,6 +243,8 @@ typedef struct PHandle {
 	RNG *rng;
 	double blend;
 	char do_aspect;
+
+	ParamBool regardFill;
 } PHandle;
 
 /* PHash
@@ -411,14 +410,6 @@ static void p_face_angles(PFace *f, double *a1, double *a2, double *a3)
 	p_triangle_angles(v1->co, v2->co, v3->co, a1, a2, a3);
 }
 
-static double p_face_area(PFace *f)
-{
-	PEdge *e1 = f->edge, *e2 = e1->next, *e3 = e2->next;
-	PVert *v1 = e1->vert, *v2 = e2->vert, *v3 = e3->vert;
-
-	return area_tri_v3(v1->co, v2->co, v3->co);
-}
-
 static double p_area_signed(double *v1, double *v2, double *v3)
 {
 	return 0.5 * (((v2[0] - v1[0]) * (v3[1] - v1[1])) -
@@ -430,8 +421,39 @@ static double p_face_uv_area_signed(PFace *f)
 	PEdge *e1 = f->edge, *e2 = e1->next, *e3 = e2->next;
 	PVert *v1 = e1->vert, *v2 = e2->vert, *v3 = e3->vert;
 
-	return 0.5 * (((v2->uv[0] - v1->uv[0]) * (v3->uv[1] - v1->uv[1])) -
-		((v3->uv[0] - v1->uv[0]) * (v2->uv[1] - v1->uv[1])));
+	return p_area_signed(v1->uv, v2->uv, v3->uv);
+}
+
+// NEW: copied from blenlib -> mathgeom.c
+
+void cross_tri_v3_d(double n[3], const double v1[3], const double v2[3], const double v3[3])
+{
+	double n1[3], n2[3];
+
+	n1[0] = v1[0] - v2[0];
+	n2[0] = v2[0] - v3[0];
+	n1[1] = v1[1] - v2[1];
+	n2[1] = v2[1] - v3[1];
+	n1[2] = v1[2] - v2[2];
+	n2[2] = v2[2] - v3[2];
+	n[0] = n1[1] * n2[2] - n1[2] * n2[1];
+	n[1] = n1[2] * n2[0] - n1[0] * n2[2];
+	n[2] = n1[0] * n2[1] - n1[1] * n2[0];
+}
+
+static double area_tri_v3_d(const double v1[3], const double v2[3], const double v3[3])
+{
+	double n[3];
+	cross_tri_v3_d(n, v1, v2, v3);
+	return sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) * 0.5f;
+}
+
+static double p_face_area(PFace *f)
+{
+	PEdge *e1 = f->edge, *e2 = e1->next, *e3 = e2->next;
+	PVert *v1 = e1->vert, *v2 = e2->vert, *v3 = e3->vert;
+
+	return area_tri_v3_d(v1->co, v2->co, v3->co);
 }
 
 static double p_edge_length(PEdge *e)
@@ -1174,6 +1196,10 @@ static PFace *p_face_add_fill(PChart *chart, PVert *v1, PVert *v2, PVert *v3)
 	chart->nfaces++;
 	chart->nedges += 3;
 
+	//v1->flag |= PVERT_BOUNDARY;
+	//v2->flag |= PVERT_BOUNDARY;
+	//v3->flag |= PVERT_BOUNDARY;
+
 	return f;
 }
 
@@ -1215,6 +1241,10 @@ static void p_chart_boundaries(PChart *chart, int *nboundaries, PEdge **outer)
 		*outer = NULL;
 
 	for (e = chart->edges; e; e = e->nextlink) {
+		if (e->pair) {
+			e->flag |= PEDGE_INTERIOR;
+		}
+
 		if (e->pair || (e->flag & PEDGE_DONE))
 			continue;
 
@@ -1225,7 +1255,8 @@ static void p_chart_boundaries(PChart *chart, int *nboundaries, PEdge **outer)
 
 		be = e;
 		do {
-			be->flag |= PEDGE_DONE;
+			be->flag |= PEDGE_DONE | PEDGE_BOUNDARY;
+			be->vert->flag |= PVERT_BOUNDARY;
 			len += p_edge_length(be);
 			be = be->next->vert->edge;
 		} while (be != e);
@@ -1275,6 +1306,7 @@ static void p_chart_fill_boundary(PChart *chart, PEdge *be, int nedges)
 
 	e = be;
 	do {
+		be->flag |= PEDGE_INTERIOR;
 		angle = p_edge_boundary_angle(e);
 		e->u.heaplink = BLI_heap_insert(heap, (float)angle, e);
 
@@ -1303,8 +1335,12 @@ static void p_chart_fill_boundary(PChart *chart, PEdge *be, int nedges)
 			BLI_heap_remove(heap, e2->u.heaplink);
 			e->u.heaplink = e1->u.heaplink = e2->u.heaplink = NULL;
 
-			e->flag |= PEDGE_FILLED;
-			e1->flag |= PEDGE_FILLED;
+			//e->flag |= PEDGE_FILLED;
+			//e1->flag |= PEDGE_FILLED;
+
+			//e->vert->flag |= PVERT_BOUNDARY;
+			//e1->vert->flag |= PVERT_BOUNDARY;
+			//e2->vert->flag |= PVERT_BOUNDARY;
 
 			f = p_face_add_fill(chart, e->vert, e1->vert, e2->vert);
 			f->flag |= PFACE_FILLED;
@@ -2299,15 +2335,25 @@ static void p_chart_simplify(PChart *chart)
 
 /* ABF */
 
-#define ABF_MAX_ITER 20
+#define ABF_MAX_ITER 50
+#define ABF_MIN_MU 1e-12
+#define ABF_START_MU 1e-6
+#define ABF_MIN_ANGLE 0.1 // in degrees
 
 typedef struct PAbfSystem {
-	int ninterior, nfaces, nangles;
+	int ninterior, nfaces, nangles,
+		nfilled_angles, nouter_boundary, ninner_boundary,
+		ninner_boundary_inner, nfilled_faces,
+		ninner_edges, ninner_edges_inner;
 	double *alpha, *beta, *sine, *cosine, *weight;
+	double *delta_alpha;
 	double *bAlpha, *bTriangle, *bInterior;
 	double *lambdaTriangle, *lambdaPlanar, *lambdaLength;
+	double *delta_lambdaTriangle, *delta_lambdaPlanar, *delta_lambdaLength;
 	double(*J2dt)[3], *bstar, *dstar;
 	double minangle, maxangle;
+	double *mu_inequalities;
+	char *mu_delta;
 } PAbfSystem;
 
 static void p_abf_setup_system(PAbfSystem *sys)
@@ -2320,6 +2366,8 @@ static void p_abf_setup_system(PAbfSystem *sys)
 	sys->cosine = (double *)MEM_mallocN(sizeof(double) * sys->nangles, "ABFcosine");
 	sys->weight = (double *)MEM_mallocN(sizeof(double) * sys->nangles, "ABFweight");
 
+	sys->delta_alpha = (double *)MEM_mallocN(sizeof(double) * sys->nangles, "ABFdeltaalpha");
+
 	sys->bAlpha = (double *)MEM_mallocN(sizeof(double) * sys->nangles, "ABFbalpha");
 	sys->bTriangle = (double *)MEM_mallocN(sizeof(double) * sys->nfaces, "ABFbtriangle");
 	sys->bInterior = (double *)MEM_mallocN(sizeof(double) * 2 * sys->ninterior, "ABFbinterior");
@@ -2328,14 +2376,21 @@ static void p_abf_setup_system(PAbfSystem *sys)
 	sys->lambdaPlanar = (double *)MEM_callocN(sizeof(double) * sys->ninterior, "ABFlamdaplane");
 	sys->lambdaLength = (double *)MEM_mallocN(sizeof(double) * sys->ninterior, "ABFlambdalen");
 
+	sys->delta_lambdaTriangle = (double *)MEM_callocN(sizeof(double) * sys->nfaces, "ABFdeltalambdatri");
+	sys->delta_lambdaPlanar = (double *)MEM_callocN(sizeof(double) * sys->ninterior, "ABFdeltalamdaplane");
+	sys->delta_lambdaLength = (double *)MEM_mallocN(sizeof(double) * sys->ninterior, "ABFdeltalambdalen");
+
 	sys->J2dt = MEM_mallocN(sizeof(double) * sys->nangles * 3, "ABFj2dt");
 	sys->bstar = (double *)MEM_mallocN(sizeof(double) * sys->nfaces, "ABFbstar");
 	sys->dstar = (double *)MEM_mallocN(sizeof(double) * sys->nfaces, "ABFdstar");
 
+	sys->mu_inequalities = (double *)MEM_mallocN(sizeof(double) * sys->nangles, "ABFmuineq");
+	sys->mu_delta = (char *)MEM_mallocN(sizeof(char) * sys->nangles, "ABFmuineq_delta");
+
 	for (i = 0; i < sys->ninterior; i++)
 		sys->lambdaLength[i] = 1.0;
 
-	sys->minangle = 1.0 * M_PI / 180.0;
+	sys->minangle = ABF_MIN_ANGLE * M_PI / 180.0;
 	sys->maxangle = M_PI - sys->minangle;
 }
 
@@ -2352,9 +2407,13 @@ static void p_abf_free_system(PAbfSystem *sys)
 	MEM_freeN(sys->lambdaTriangle);
 	MEM_freeN(sys->lambdaPlanar);
 	MEM_freeN(sys->lambdaLength);
+
 	MEM_freeN(sys->J2dt);
 	MEM_freeN(sys->bstar);
 	MEM_freeN(sys->dstar);
+
+	MEM_freeN(sys->mu_inequalities);
+	MEM_freeN(sys->mu_delta);
 }
 
 static void p_abf_compute_sines(PAbfSystem *sys)
@@ -2403,12 +2462,13 @@ static double p_abf_compute_sin_product(PAbfSystem *sys, PVert *v, int aid)
 	return (sin1 - sin2);
 }
 
-static double p_abf_compute_grad_alpha(PAbfSystem *sys, PFace *f, PEdge *e)
+static double p_abf_compute_grad_alpha(PAbfSystem *sys, PChart *chart, PFace *f, PEdge *e)
 {
 	PVert *v = e->vert, *v1 = e->next->vert, *v2 = e->next->next->vert;
 	double deriv;
 
 	deriv = (sys->alpha[e->u.id] - sys->beta[e->u.id]) * sys->weight[e->u.id];
+	
 	deriv += sys->lambdaTriangle[f->u.id];
 
 	if (v->flag & PVERT_INTERIOR) {
@@ -2423,6 +2483,15 @@ static double p_abf_compute_grad_alpha(PAbfSystem *sys, PFace *f, PEdge *e)
 	if (v2->flag & PVERT_INTERIOR) {
 		double product = p_abf_compute_sin_product(sys, v2, e->u.id);
 		deriv += sys->lambdaLength[v2->u.id] * product;
+	}
+	
+	if (chart->handle->regardFill) {
+		if (f->flag & PFACE_FILLED) {
+			deriv -= (sys->mu_inequalities[e->u.id] + sys->mu_inequalities[e->next->next->u.id]) / tan(sys->alpha[e->u.id]);
+		}
+		else {
+			deriv -= sys->mu_inequalities[e->u.id] / tan(sys->alpha[e->u.id]);
+		}
 	}
 
 	return deriv;
@@ -2439,9 +2508,9 @@ static double p_abf_compute_gradient(PAbfSystem *sys, PChart *chart)
 		PEdge *e1 = f->edge, *e2 = e1->next, *e3 = e2->next;
 		double gtriangle, galpha1, galpha2, galpha3;
 
-		galpha1 = p_abf_compute_grad_alpha(sys, f, e1);
-		galpha2 = p_abf_compute_grad_alpha(sys, f, e2);
-		galpha3 = p_abf_compute_grad_alpha(sys, f, e3);
+		galpha1 = p_abf_compute_grad_alpha(sys, chart, f, e1);
+		galpha2 = p_abf_compute_grad_alpha(sys, chart, f, e2);
+		galpha3 = p_abf_compute_grad_alpha(sys, chart, f, e3);
 
 		sys->bAlpha[e1->u.id] = -galpha1;
 		sys->bAlpha[e2->u.id] = -galpha2;
@@ -2451,12 +2520,13 @@ static double p_abf_compute_gradient(PAbfSystem *sys, PChart *chart)
 
 		gtriangle = sys->alpha[e1->u.id] + sys->alpha[e2->u.id] + sys->alpha[e3->u.id] - M_PI;
 		sys->bTriangle[f->u.id] = -gtriangle;
+
 		norm += gtriangle * gtriangle;
 	}
 
 	for (v = chart->verts; v; v = v->nextlink) {
 		if (v->flag & PVERT_INTERIOR) {
-			double gplanar = -2 * M_PI, glength;
+			double gplanar = -2.0 * M_PI, glength;
 
 			e = v->edge;
 			do {
@@ -2476,7 +2546,61 @@ static double p_abf_compute_gradient(PAbfSystem *sys, PChart *chart)
 	return norm;
 }
 
-static PBool p_abf_matrix_invert(PAbfSystem *sys, PChart *chart)
+static double p_abf_get_max_damping_and_adapt_weights(PAbfSystem *sys, PChart *chart) {
+	PFace *f;
+	PEdge *e;
+
+	double damping = -1.0;
+
+	printf("\n\t\tfinding maximum damping\n");
+
+	for (f = chart->faces; f; f = f->nextlink) {
+		if (f->flag & PFACE_FILLED) {
+			continue;
+		}
+
+		e = f->edge;
+		double dampingTemp;
+
+		do {
+			if (sys->delta_alpha[e->u.id] < 0) {
+				dampingTemp = (sys->minangle - sys->alpha[e->u.id]) / sys->delta_alpha[e->u.id];
+			}
+			else if (sys->delta_alpha[e->u.id] > 0) {
+				dampingTemp = (sys->maxangle - sys->alpha[e->u.id]) / sys->delta_alpha[e->u.id];
+			}
+			else {
+				e = e->next;
+				continue;
+			}
+
+			if (dampingTemp < 1) {
+				/*
+				printf("\t\t\t%d: maximum damping = %g for angle %g , delta = %g , mu = %g\n", f->u.id, dampingTemp, sys->alpha[e->u.id] * 180.0 / M_PI, sys->delta_alpha[e->u.id] * 180.0 / M_PI, sys->mu_inequalities[e->u.id]);
+				*/
+				
+				// adapt weight
+				sys->mu_inequalities[e->u.id] = sqrt(sys->mu_inequalities[e->u.id]);
+				
+				if (sys->mu_inequalities[e->u.id] < ABF_START_MU) {
+					sys->mu_inequalities[e->u.id] = ABF_START_MU;
+				}
+			}
+
+			if (dampingTemp < damping || damping < 0.0) {
+				damping = dampingTemp;
+			}
+
+			e = e->next;
+		} while (e != f->edge);
+	}
+
+	printf("\t\tmaximum damping = %g\n", damping);
+
+	return damping;
+}
+
+static PBool p_abf_matrix_invert(PAbfSystem *sys, PChart *chart, double norm_gradient, bool *noFurtherIterations)
 {
 	PFace *f;
 	PEdge *e;
@@ -2490,15 +2614,40 @@ static PBool p_abf_matrix_invert(PAbfSystem *sys, PChart *chart)
 		EIG_linear_solver_right_hand_side_add(context, 0, i, sys->bInterior[i]);
 
 	for (f = chart->faces; f; f = f->nextlink) {
-		double wi1, wi2, wi3, b, si, beta[3], j2[3][3], W[3][3];
+		double w1, w2, w3, wi1, wi2, wi3, b, si, beta[3], j2[3][3], W[3][3];
 		double row1[6], row2[6], row3[6];
 		int vid[6];
 		PEdge *e1 = f->edge, *e2 = e1->next, *e3 = e2->next;
 		PVert *v1 = e1->vert, *v2 = e2->vert, *v3 = e3->vert;
 
-		wi1 = 1.0 / sys->weight[e1->u.id];
-		wi2 = 1.0 / sys->weight[e2->u.id];
-		wi3 = 1.0 / sys->weight[e3->u.id];
+		if (chart->handle->regardFill) {
+			w1 = sys->mu_inequalities[e1->u.id];
+			w2 = sys->mu_inequalities[e2->u.id];
+			w3 = sys->mu_inequalities[e3->u.id];
+
+			if (f->flag & PFACE_FILLED) {
+				w1 += sys->mu_inequalities[e3->u.id];
+				w2 += sys->mu_inequalities[e1->u.id];
+				w3 += sys->mu_inequalities[e2->u.id];
+			}
+
+			w1 *= -2.0 / (cos(2.0 * sys->alpha[e1->u.id]) - 1.0);
+			w2 *= -2.0 / (cos(2.0 * sys->alpha[e2->u.id]) - 1.0);
+			w3 *= -2.0 / (cos(2.0 * sys->alpha[e3->u.id]) - 1.0);
+		}
+		else {
+			w1 = 0.0;
+			w2 = 0.0;
+			w3 = 0.0;
+		}
+
+		w1 += sys->weight[e1->u.id];
+		w2 += sys->weight[e2->u.id];
+		w3 += sys->weight[e3->u.id];
+
+		wi1 = 1.0 / w1;
+		wi2 = 1.0 / w2;
+		wi3 = 1.0 / w3;
 
 		/* bstar1 = (J1*dInv*bAlpha - bTriangle) */
 		b = sys->bAlpha[e1->u.id] * wi1;
@@ -2519,9 +2668,9 @@ static PBool p_abf_matrix_invert(PAbfSystem *sys, PChart *chart)
 		sys->dstar[f->u.id] = si;
 
 		/* set matrix */
-		W[0][0] = si - sys->weight[e1->u.id]; W[0][1] = si; W[0][2] = si;
-		W[1][0] = si; W[1][1] = si - sys->weight[e2->u.id]; W[1][2] = si;
-		W[2][0] = si; W[2][1] = si; W[2][2] = si - sys->weight[e3->u.id];
+		W[0][0] = si - w1; W[0][1] = si; W[0][2] = si;
+		W[1][0] = si; W[1][1] = si - w2; W[1][2] = si;
+		W[2][0] = si; W[2][1] = si; W[2][2] = si - w3;
 
 		vid[0] = vid[1] = vid[2] = vid[3] = vid[4] = vid[5] = -1;
 
@@ -2620,9 +2769,34 @@ static PBool p_abf_matrix_invert(PAbfSystem *sys, PChart *chart)
 
 	if (success) {
 		for (f = chart->faces; f; f = f->nextlink) {
-			double dlambda1, pre[3], dalpha;
+			double dlambda1, pre[3], dalpha, w1, w2, w3;
 			PEdge *e1 = f->edge, *e2 = e1->next, *e3 = e2->next;
 			PVert *v1 = e1->vert, *v2 = e2->vert, *v3 = e3->vert;
+
+			if (chart->handle->regardFill) {
+				w1 = sys->mu_inequalities[e1->u.id];
+				w2 = sys->mu_inequalities[e2->u.id];
+				w3 = sys->mu_inequalities[e3->u.id];
+
+				if (f->flag & PFACE_FILLED) {
+					w1 += sys->mu_inequalities[e3->u.id];
+					w2 += sys->mu_inequalities[e1->u.id];
+					w3 += sys->mu_inequalities[e2->u.id];
+				}
+
+				w1 *= -2.0 / (cos(2.0 * sys->alpha[e1->u.id]) - 1.0);
+				w2 *= -2.0 / (cos(2.0 * sys->alpha[e2->u.id]) - 1.0);
+				w3 *= -2.0 / (cos(2.0 * sys->alpha[e3->u.id]) - 1.0);
+			}
+			else {
+				w1 = 0.0;
+				w2 = 0.0;
+				w3 = 0.0;
+			}
+
+			w1 += sys->weight[e1->u.id];
+			w2 += sys->weight[e2->u.id];
+			w3 += sys->weight[e3->u.id];
 
 			pre[0] = pre[1] = pre[2] = 0.0;
 
@@ -2650,33 +2824,152 @@ static PBool p_abf_matrix_invert(PAbfSystem *sys, PChart *chart)
 				pre[2] += sys->J2dt[e3->u.id][2] * x;
 			}
 
-			dlambda1 = pre[0] + pre[1] + pre[2];
-			dlambda1 = sys->dstar[f->u.id] * (sys->bstar[f->u.id] - dlambda1);
+			dlambda1 = sys->dstar[f->u.id] * (sys->bstar[f->u.id] - (pre[0] + pre[1] + pre[2]));
 
-			sys->lambdaTriangle[f->u.id] += dlambda1;
+			sys->delta_lambdaTriangle[f->u.id] = dlambda1;
 
 			dalpha = (sys->bAlpha[e1->u.id] - dlambda1);
-			sys->alpha[e1->u.id] += dalpha / sys->weight[e1->u.id] - pre[0];
+			sys->delta_alpha[e1->u.id] = dalpha / w1 - pre[0];
 
 			dalpha = (sys->bAlpha[e2->u.id] - dlambda1);
-			sys->alpha[e2->u.id] += dalpha / sys->weight[e2->u.id] - pre[1];
+			sys->delta_alpha[e2->u.id] = dalpha / w2 - pre[1];
 
 			dalpha = (sys->bAlpha[e3->u.id] - dlambda1);
-			sys->alpha[e3->u.id] += dalpha / sys->weight[e3->u.id] - pre[2];
-
-			/* clamp */
-			e = f->edge;
-			do {
-				if (sys->alpha[e->u.id] > M_PI)
-					sys->alpha[e->u.id] = M_PI;
-				else if (sys->alpha[e->u.id] < 0.0)
-					sys->alpha[e->u.id] = 0.0;
-			} while (e != f->edge);
+			sys->delta_alpha[e3->u.id] = dalpha / w3 - pre[2];
 		}
 
 		for (i = 0; i < ninterior; i++) {
-			sys->lambdaPlanar[i] += EIG_linear_solver_variable_get(context, 0, i);
-			sys->lambdaLength[i] += EIG_linear_solver_variable_get(context, 0, ninterior + i);
+			sys->delta_lambdaPlanar[i] = EIG_linear_solver_variable_get(context, 0, i);
+			sys->delta_lambdaLength[i] = EIG_linear_solver_variable_get(context, 0, ninterior + i);
+		}
+	}
+	
+	double damping = 1.0;
+
+	if (chart->handle->regardFill) {
+		double dampingNonFilled = p_abf_get_max_damping_and_adapt_weights(sys, chart);
+
+		if (dampingNonFilled < 0.0) {
+			dampingNonFilled = 1.0;
+		}
+
+		double dampingRel = 0.8;
+		double dampingFilled = damping / dampingRel;
+		double minDamping = 1e-2;
+
+		bool reject = false;
+
+		PEdge *e1, *e2, *e3;
+		do {
+			dampingFilled *= dampingRel;
+
+			if (dampingFilled < minDamping) {
+				dampingFilled = 0.0;
+				break;
+			}
+
+			//printf("\n\ttrying dampingFilled = %g\n", dampingFilled);
+
+			reject = false;
+
+			for (f = chart->faces; f; f = f->nextlink) {
+				e1 = f->edge;
+				e2 = e1->next;
+				e3 = e2->next;
+
+				if (chart->handle->regardFill && f->flag & PFACE_FILLED) {
+					/*
+					if (sys->alpha[e1->u.id] + sys->delta_alpha[e1->u.id] * dampingFilled < 0 ||
+						sys->alpha[e2->u.id] + sys->delta_alpha[e2->u.id] * dampingFilled < 0 ||
+						sys->alpha[e3->u.id] + sys->delta_alpha[e3->u.id] * dampingFilled < 0) {
+						printf("\n\t\t%d : negative angle\n\t\t%g , %g , %g\n", f->u.id,
+							(sys->alpha[e1->u.id] + sys->delta_alpha[e1->u.id] * dampingFilled) / M_PI * 180.0,
+							(sys->alpha[e2->u.id] + sys->delta_alpha[e2->u.id] * dampingFilled) / M_PI * 180.0,
+							(sys->alpha[e3->u.id] + sys->delta_alpha[e3->u.id] * dampingFilled) / M_PI * 180.0
+						);
+					}
+					*/
+
+					e = f->edge;
+
+					do {
+						double sin1 = sin(sys->alpha[e->u.id] + sys->delta_alpha[e->u.id] * dampingFilled),
+							sin2 = sin(sys->alpha[e->next->u.id] + sys->delta_alpha[e->next->u.id] * dampingFilled);
+
+						if (sin1 * sin2 <= 0
+							|| fabs(sin1) < sys->minangle || fabs(sin2) < sys->minangle
+							) {
+							/*
+							printf("\n\t\t%d : %ssin(a)*sin(b) <= 0\n\t\t%g , %g , %g\n", f->u.id, f->flag & PFACE_FILLED ? "" : "normal ",
+								(sys->alpha[e1->u.id] + sys->delta_alpha[e1->u.id] * dampingFilled) / M_PI * 180.0,
+								(sys->alpha[e2->u.id] + sys->delta_alpha[e2->u.id] * dampingFilled) / M_PI * 180.0,
+								(sys->alpha[e3->u.id] + sys->delta_alpha[e3->u.id] * dampingFilled) / M_PI * 180.0
+							);
+							printf("\t\tmu is %g\n", sys->mu_inequalities[e->u.id]);
+							*/
+
+							sys->mu_delta[e->u.id] |= 2;
+
+							reject = true;
+						}
+
+						e = e->next;
+					} while (e != f->edge);
+				}
+			}
+
+			//printf("\n\tyields reject = %s\n", reject ? "true" : "false");
+		} while (reject || dampingFilled > dampingNonFilled);
+
+		if (dampingNonFilled < dampingFilled) {
+			damping = dampingNonFilled;
+		}
+		else {
+			damping = dampingFilled;
+		}
+	}
+
+	printf("\n\tfinally using damping = %g", damping);
+
+	// <-- update alphas and lambdas
+	double *alpha = sys->alpha,
+		*delta_alpha = sys->delta_alpha;
+	for (i = 0; i < sys->nangles; i++, alpha++, delta_alpha++) {
+		*alpha += *delta_alpha * damping;
+	}
+
+	double *lambdaTriangle = sys->lambdaTriangle,
+		*delta_lambdaTriangle = sys->delta_lambdaTriangle;
+	for (i = 0; i < sys->nfaces; i++, lambdaTriangle++, delta_lambdaTriangle++) {
+		*lambdaTriangle += *delta_lambdaTriangle * damping;
+	}
+
+	double *lambdaPlanar = sys->lambdaPlanar,
+		*delta_lambdaPlanar = sys->delta_lambdaPlanar,
+		*lambdaLength = sys->lambdaLength,
+		*delta_lambdaLength = sys->delta_lambdaLength;
+	for (i = 0; i < sys->ninterior; i++, lambdaPlanar++, delta_lambdaPlanar++, lambdaLength++, delta_lambdaLength++) {
+		*lambdaPlanar += *delta_lambdaPlanar * damping;
+		*lambdaLength += *delta_lambdaLength * damping;
+	}
+	// -->
+
+
+	if (chart->handle->regardFill) {
+		char *mu_delta = sys->mu_delta;
+		double *mu_inequalities = sys->mu_inequalities;
+		for (int i = 0; i < sys->nangles; i++, mu_delta++, mu_inequalities++) {
+			if (*mu_delta > 0) {
+				*mu_inequalities = sqrt(*mu_inequalities);
+
+				if (*mu_inequalities < ABF_START_MU) {
+					*mu_inequalities = ABF_START_MU;
+				}
+
+				//printf("\n\t\t%g\n", *mu_inequalities);
+			}
+
+			*mu_delta = 0;
 		}
 	}
 
@@ -2720,9 +3013,10 @@ static inline void p_chart_abf_calc_missing_vert_of_triangle(double *alphas, PEd
 
 	double sinGamma = sin(gamma);
 
-	if (sinGamma > -1e-3 && sinGamma < 1e-3) {
+	if (sinGamma > -1e-8 && sinGamma < 1e-8) {
 		copy_v2_v2_d(e3->vert->uv, e1->vert->uv);
-		printf("TTTTTT\n");
+		add_v2_v2_d(e3->vert->uv, e2->vert->uv);
+		mul_v2_fl_d(e3->vert->uv, 0.5);
 	}
 	else {
 		double b = c * sin(beta) / sin(gamma);
@@ -2761,10 +3055,6 @@ static inline void p_chart_abf_set_vertex(double *alpha, struct BLI_Stack *edgeS
 	e2 = edge->next;
 	e3 = e2->next;
 
-	//if (!(e3->vert->flag & PVERT_ABF_SET)) {
-	//printf("angles: %f , %f , %f\n", alpha[edge->u.id] * 180 / M_PI, alpha[e2->u.id] * 180 / M_PI, alpha[e3->u.id] * 180 / M_PI);
-
-
 	double old_uv[2];
 	if (e3->vert->flag & PVERT_ABF_SET) {
 		copy_v2_v2_d(old_uv, e3->vert->uv);
@@ -2777,18 +3067,7 @@ static inline void p_chart_abf_set_vertex(double *alpha, struct BLI_Stack *edgeS
 
 	mul_v2_fl_d(e3->vert->uv, 0.5);
 
-	//if (e3->vert->flag & PVERT_ABF_SET) {
-	//if (len_v2v2(e3->vert->uv, old_uv) > 0.013) {
-	//	printf("%d\t: from\t( %f | %f )\tto\t( %f | %f )\n", e3->vert->u.id, old_uv[0], old_uv[1], e3->vert->uv[0], e3->vert->uv[1]);
-	//}
-
-	//mul_v2_fl(e3->vert->uv, 0.5);
-	//mul_v2_fl(old_uv, 0.5);
-	//add_v2_v2(e3->vert->uv, old_uv);
-	//}
-
 	e3->vert->flag |= PVERT_ABF_SET;
-	//}
 
 	if (e2->pair) {
 		BLI_stack_push(edgeStack, &(e2->pair));
@@ -2797,11 +3076,6 @@ static inline void p_chart_abf_set_vertex(double *alpha, struct BLI_Stack *edgeS
 		BLI_stack_push(edgeStack, &(e3->pair));
 	}
 
-}
-
-static void p_chart_abf_begin(PChart *chart)
-{
-	// fill holes if any
 }
 
 static bool isAlmostEqual(double a[3], double b[3]) {
@@ -2819,43 +3093,39 @@ static bool isAlmostEqual(double a[3], double b[3]) {
 static void p_chart_abf_end(PChart *chart)
 {
 	PEdge *e = chart->edges;
-	double *alpha = chart->u.abf.alpha;
+	double *alpha = chart->u.lscm.abf_alpha;
 
 	p_chart_abf_init(chart);
 
-	/*
-	//double findCO_1[3] = { -0.2999998927116394, -0.2000000327825546, 0.1732051670551300 };
-	//double findCO_2[3] = { -0.6000000238418579, -0.2000000178813934, -0.0000000074505806 };
-	double findCO_1[3] = { -0.1999998241662979, -0.3999999761581421, -0.3464100956916809 };
-	double findCO_2[3] = { -0.1999998241662979, -0.0000000149011612, -0.3464100956916809 };
-	
-	while (!(isAlmostEqual(e->vert->co, findCO_1) && isAlmostEqual(e->next->vert->co, findCO_2)) && e->nextlink) {
+	while (e->pair) {
 		e = e->nextlink;
 	}
-	*/
 
 	copy_v2_fl2_d(e->vert->uv, 0.0, 0.0);
-	//copy_v2_fl2_d(e->next->vert->uv, 0.0, p_edge_length(e));
 	copy_v2_fl2_d(e->next->vert->uv, p_edge_length(e), 0.0);
 
 	struct BLI_Stack *edgeStack = BLI_stack_new(sizeof(e), "p_chart_abf_end_EDGES");
 
 	BLI_stack_push(edgeStack, &e);
-	if (e->pair) {
-		BLI_stack_push(edgeStack, &(e->pair));
-	}
+	//if (e->pair) {
+	//	BLI_stack_push(edgeStack, &(e->pair));
+	//}
 
 	while (!BLI_stack_is_empty(edgeStack)) {
 		BLI_stack_pop(edgeStack, &e);
+
+		if (e->face->flag & PFACE_FILLED) {
+			continue;
+		}
 
 		p_chart_abf_set_vertex(alpha, edgeStack, e);
 	}
 
 	BLI_stack_free(edgeStack);
 
-	if (chart->u.abf.alpha) {
-		MEM_freeN(chart->u.abf.alpha);
-		chart->u.abf.alpha = NULL;
+	if (chart->u.lscm.abf_alpha) {
+		MEM_freeN(chart->u.lscm.abf_alpha);
+		chart->u.lscm.abf_alpha = NULL;
 	}
 }
 
@@ -2869,18 +3139,42 @@ static PBool p_chart_abf_solve(PChart *chart)
 	PEdge *e, *e1, *e2, *e3;
 	PAbfSystem sys;
 	int i;
-	double /* lastnorm, */ /* UNUSED */ limit = (chart->nfaces > 100) ? 1.0 : 0.001;
+	// get appropriate abort criterion
+	// note that limit is increasing for increasing nfaces
+	double limit = atan(log(chart->nfaces) - 12) + 1.4;
 
+	if (limit < 1e-4)
+		limit = 1e-4;
+	else if (limit > 1)
+		limit = 1;
+
+	ParamBool regardFill = chart->handle->regardFill;
+	
 	/* setup id's */
-	sys.ninterior = sys.nfaces = sys.nangles = 0;
+	sys.ninterior = sys.ninner_boundary = sys.nouter_boundary = sys.ninner_boundary_inner =
+		sys.nfaces = sys.nfilled_faces = sys.nangles = sys.nfilled_angles =
+		sys.ninner_edges = sys.ninner_edges_inner = 0;
 
 	for (v = chart->verts; v; v = v->nextlink) {
 		if (p_vert_interior(v)) {
 			v->flag |= PVERT_INTERIOR;
 			v->u.id = sys.ninterior++;
+
+			if (v->flag & PVERT_BOUNDARY) {
+				sys.ninner_boundary++;
+			}
 		}
-		else
+		else {
 			v->flag &= ~PVERT_INTERIOR;
+
+			if (v->flag & PVERT_BOUNDARY) {
+				sys.nouter_boundary++;
+			}
+		}
+
+		if (v->flag & PVERT_FILLED) {
+			sys.ninner_boundary_inner++;
+		}
 	}
 
 	for (f = chart->faces; f; f = f->nextlink) {
@@ -2891,7 +3185,60 @@ static PBool p_chart_abf_solve(PChart *chart)
 		e1->u.id = sys.nangles++;
 		e2->u.id = sys.nangles++;
 		e3->u.id = sys.nangles++;
+
+		if (f->flag & PFACE_FILLED) {
+			sys.nfilled_angles += 3;
+			sys.nfilled_faces++;
+		}
 	}
+
+	sys.ninner_edges = (3 * (sys.nfaces - sys.nfilled_faces) - (sys.nouter_boundary + sys.ninner_boundary)) / 2;
+	sys.ninner_edges_inner = (3 * sys.nfilled_faces - sys.ninner_boundary) / 2;
+
+	printf("\nchart:\n\touter boundary: %d , inner boundaries: %d , inner vertices: %d, filled inner vertices: %d , inner edges: %d , filled inner edges: %d , faces: %d, filled faces: %d\n\tabort eps: %g\n\n",
+		sys.nouter_boundary, sys.ninner_boundary,
+		sys.ninterior - sys.ninner_boundary - sys.ninner_boundary_inner, sys.ninner_boundary_inner,
+		sys.ninner_edges, sys.ninner_edges_inner,
+		sys.nfaces - sys.nfilled_faces, sys.nfilled_faces,
+		limit);
+
+	int numVertBnd = sys.nouter_boundary + sys.ninner_boundary,
+		numVertInt = sys.ninterior - sys.ninner_boundary - sys.ninner_boundary_inner,
+		numVert = numVertBnd + numVertInt,
+		numEdgeInt = sys.ninner_edges,
+		numEdge = numVertBnd + numEdgeInt,
+		numFace = sys.nfaces - sys.nfilled_faces;
+	printf("\noriginal:\n\tboundary vertices: %d , inner vertices: %d , total vertices: %d, boundary edges: %d , inner edges: %d , total edges: %d , total faces: %d , b: %d\n",
+		// vertices
+		numVertBnd,
+		numVertInt,
+		numVert,
+		// edges
+		sys.nouter_boundary + sys.ninner_boundary,
+		numEdgeInt,
+		numEdge,
+		// faces
+		numFace,
+		2 - numVert + numEdge - numFace);
+
+	int numVertBnd_darned = sys.nouter_boundary,
+		numVertInt_darned = sys.ninterior,
+		numVert_darned = numVertBnd_darned + numVertInt_darned,
+		numEdgeInt_darned = sys.ninner_edges + sys.ninner_edges_inner + sys.ninner_boundary,
+		numEdge_darned = numVertBnd_darned + numEdgeInt_darned,
+		numFace_darned = sys.nfaces;
+	printf("\ndarned:\n\tboundary vertices: %d , inner vertices: %d , total vertices: %d, boundary edges: %d , inner edges: %d , total edges: %d , total faces: %d , b: %d\n",
+		// vertices
+		numVertBnd_darned,
+		numVertInt_darned,
+		numVert_darned,
+		// edges
+		numVertBnd_darned,
+		numEdgeInt_darned,
+		numEdge_darned,
+		// faces
+		numFace_darned,
+		2 - numVert_darned + numEdge_darned - numFace_darned);
 
 	p_abf_setup_system(&sys);
 
@@ -2902,79 +3249,189 @@ static PBool p_chart_abf_solve(PChart *chart)
 		e1 = f->edge; e2 = e1->next; e3 = e2->next;
 		p_face_angles(f, &a1, &a2, &a3);
 
-		if (a1 < sys.minangle)
-			a1 = sys.minangle;
-		else if (a1 > sys.maxangle)
-			a1 = sys.maxangle;
-		if (a2 < sys.minangle)
-			a2 = sys.minangle;
-		else if (a2 > sys.maxangle)
-			a2 = sys.maxangle;
-		if (a3 < sys.minangle)
-			a3 = sys.minangle;
-		else if (a3 > sys.maxangle)
-			a3 = sys.maxangle;
-
 		sys.alpha[e1->u.id] = sys.beta[e1->u.id] = a1;
 		sys.alpha[e2->u.id] = sys.beta[e2->u.id] = a2;
 		sys.alpha[e3->u.id] = sys.beta[e3->u.id] = a3;
 
-		sys.weight[e1->u.id] = 2.0 / (a1 * a1);
-		sys.weight[e2->u.id] = 2.0 / (a2 * a2);
-		sys.weight[e3->u.id] = 2.0 / (a3 * a3);
+		sys.mu_delta[e1->u.id] = sys.mu_delta[e2->u.id] = sys.mu_delta[e3->u.id] = 0;
+
+		if (regardFill && f->flag & PFACE_FILLED) {
+			sys.mu_inequalities[e1->u.id] = sys.mu_inequalities[e2->u.id] = sys.mu_inequalities[e3->u.id] = ABF_MIN_MU;
+			// it would be desirable to set these to 0 if no ineq. is violated but then Lambda is no longer invertible and hence one could not use ABF++
+			// therefore set it to a small yet sufficiently large value to obtain a non-singular Hessian matrix
+		}
+		else {
+			// let the inequalities only affect the solution if it is neccessary due to violation in an iteration
+			sys.mu_inequalities[e1->u.id] = sys.mu_inequalities[e2->u.id] = sys.mu_inequalities[e3->u.id] = 0.0;
+		}
 	}
 
-	for (v = chart->verts; v; v = v->nextlink) {
-		if (v->flag & PVERT_INTERIOR) {
-			double anglesum = 0.0, scale;
+	if (!regardFill) {
+		for (v = chart->verts; v; v = v->nextlink) {
+			if (!regardFill && !(v->flag & PVERT_INTERIOR)) {
+				continue;
+			}
+
+			double anglesum = 0.0, anglesumFilled = 0.0, scale, scaleFilled;
 
 			e = v->edge;
 			do {
-				anglesum += sys.beta[e->u.id];
+				if (regardFill && e->face->flag & PFACE_FILLED) {
+					anglesumFilled += sys.beta[e->u.id];
+				}
+				else {
+					anglesum += sys.beta[e->u.id];
+				}
+
 				e = e->next->next->pair;
 			} while (e && (e != v->edge));
 
-			scale = (anglesum == 0.0) ? 0.0 : 2.0 * M_PI / anglesum;
+			if (anglesum == 0.0) {
+				scale = 0.0;
+				scaleFilled = 1.0;
+			}
+			else if (anglesum < 2.0 * M_PI && anglesumFilled != 0.0) {
+				scale = 1.0;
+				scaleFilled = (2.0 * M_PI - anglesum) / anglesumFilled;
+			}
+			else if (v->flag & PVERT_INTERIOR || anglesum > 2.0 * M_PI) {
+				scale = 2.0 * M_PI / anglesum;
+				scaleFilled = 0.0;
+			}
+			else {
+				scale = 1.0;
+				scaleFilled = 1.0;
+			}
 
 			e = v->edge;
+			double s;
 			do {
-				sys.beta[e->u.id] = sys.alpha[e->u.id] = sys.beta[e->u.id] * scale;
+				if (regardFill && e->face->flag & PFACE_FILLED) {
+					s = scaleFilled;
+					//printf("\ns = scaleFilled = %g\n", s);
+				}
+				else {
+					s = scale;
+					//printf("\ns = scale = %g\n", s);
+				}
+
+				sys.alpha[e->u.id] *= s;
+				//if (!regardFill) {
+					sys.beta[e->u.id] *= s;
+				//}
+
 				e = e->next->next->pair;
 			} while (e && (e != v->edge));
 		}
 	}
 
-	if (sys.ninterior > 0) {
-		p_abf_compute_sines(&sys);
+	for (f = chart->faces; f; f = f->nextlink) {
+		e = f->edge;
+		do {
+			if (sys.alpha[e->u.id] < sys.minangle) {
+				sys.alpha[e->u.id] = sys.minangle;
 
-		/* iteration */
-		/* lastnorm = 1e10; */ /* UNUSED */
+				if (!(f->flag & PFACE_FILLED)) {
+					sys.mu_inequalities[e->u.id] = ABF_START_MU;
+				}
+			}
+			else if (sys.alpha[e->u.id] > sys.maxangle) {
+				sys.alpha[e->u.id] = sys.maxangle;
 
-		for (i = 0; i < ABF_MAX_ITER; i++) {
-			double norm = p_abf_compute_gradient(&sys, chart);
-
-			/* lastnorm = norm; */ /* UNUSED */
-
-			if (norm < limit)
-				break;
-
-			if (!p_abf_matrix_invert(&sys, chart)) {
-				param_warning("ABF failed to invert matrix");
-				p_abf_free_system(&sys);
-				return P_FALSE;
+				if (!(f->flag & PFACE_FILLED)) {
+					sys.mu_inequalities[e->u.id] = ABF_START_MU;
+				}
 			}
 
-			p_abf_compute_sines(&sys);
+			if (sys.beta[e->u.id] < sys.minangle)
+				sys.beta[e->u.id] = sys.minangle;
+			else if (sys.beta[e->u.id] > sys.maxangle)
+				sys.beta[e->u.id] = sys.maxangle;
+
+			e = e->next;
+		} while (e != f->edge);
+
+		double a1, a2, a3;
+
+		e1 = f->edge; e2 = e1->next; e3 = e2->next;
+
+		if (regardFill && f->flag & PFACE_FILLED) {
+			sys.weight[e1->u.id] = sys.weight[e2->u.id] = sys.weight[e3->u.id] = 0;
+		}
+		else {
+			a1 = sys.beta[e1->u.id];
+			a2 = sys.beta[e2->u.id];
+			a3 = sys.beta[e3->u.id];
+
+			sys.weight[e1->u.id] = 2.0 / (a1 * a1);
+			sys.weight[e2->u.id] = 2.0 / (a2 * a2);
+			sys.weight[e3->u.id] = 2.0 / (a3 * a3);
+		}
+	}
+
+	if (regardFill) {
+		// adapt weights proportional to their area
+		double totalArea = 0.0;
+
+		for (f = chart->faces; f; f = f->nextlink) {
+			if (f->flag & PFACE_FILLED) {
+				continue;
+			}
+
+			double area = p_face_area(f);
+
+			totalArea += area;
+
+			e1 = f->edge; e2 = e1->next; e3 = e2->next;
+
+			sys.weight[e1->u.id] *= area;
+			sys.weight[e2->u.id] *= area;
+			sys.weight[e3->u.id] *= area;
+		}
+
+		double *weight = sys.weight;
+		for (i = 0; i < sys.nangles; i++, weight++) {
+			*weight /= totalArea;
+		}
+	}
+
+	clock_t startTime = clock();
+	for (i = 0; i <= ABF_MAX_ITER; i++) {
+		p_abf_compute_sines(&sys);
+
+		double norm = p_abf_compute_gradient(&sys, chart);
+
+		if (norm < limit) {
+			printf("\ndone after %d iterations, norm was %e , elapsed seconds: %f\n", i, norm, ((double)clock() - startTime) / CLOCKS_PER_SEC);
+			break;
 		}
 
 		if (i == ABF_MAX_ITER) {
+			printf("\nABF maximum iterations reached\n");
 			param_warning("ABF maximum iterations reached");
+			break;
+		}
+
+		printf("\n--- iteration %d (norm = %e, elapsed seconds: %f) ---\n", i + 1, norm, ((double)clock() - startTime) / CLOCKS_PER_SEC);
+
+		bool noFurtherIterations = false;
+
+		if (!p_abf_matrix_invert(&sys, chart, norm, &noFurtherIterations)) {
+			printf("\nABF failed to invert matrix\n");
+			param_warning("ABF failed to invert matrix");
 			p_abf_free_system(&sys);
 			return P_FALSE;
 		}
+
+		if (noFurtherIterations) {
+			p_abf_compute_sines(&sys);
+			norm = p_abf_compute_gradient(&sys, chart);
+			printf("\ndone after %d iterations, norm was %e, elapsed seconds: %f (no further improvement was possible)\n", i + 1, norm, ((double)clock() - startTime) / CLOCKS_PER_SEC);
+			break;
+		}
 	}
 
-	chart->u.abf.alpha = MEM_dupallocN(sys.alpha);
+	chart->u.lscm.abf_alpha = MEM_dupallocN(sys.alpha);
 	p_abf_free_system(&sys);
 
 	return P_TRUE;
@@ -3138,6 +3595,55 @@ static PBool p_chart_symmetry_pins(PChart *chart, PEdge *outer, PVert **pin1, PV
 	return !equals_v3v3((*pin1)->co, (*pin2)->co);
 }
 
+static void p_chart_extrema_bnd_verts(PChart *chart, PEdge *outer, PVert **pin1, PVert **pin2)
+{
+	double minv[3], maxv[3], dirlen;
+	PVert *v, *minvert[3], *maxvert[3];
+	PEdge *be;
+	int i, dir;
+
+	/* find minimum and maximum verts over x/y/z axes */
+	minv[0] = minv[1] = minv[2] = 1e20;
+	maxv[0] = maxv[1] = maxv[2] = -1e20;
+
+	minvert[0] = minvert[1] = minvert[2] = NULL;
+	maxvert[0] = maxvert[1] = maxvert[2] = NULL;
+
+	be = outer;
+	do {
+		v = be->vert;
+
+		for (i = 0; i < 3; i++) {
+			if (v->co[i] < minv[i]) {
+				minv[i] = v->co[i];
+				minvert[i] = v;
+			}
+			if (v->co[i] > maxv[i]) {
+				maxv[i] = v->co[i];
+				maxvert[i] = v;
+			}
+		}
+
+		be = p_boundary_edge_next(be);
+	} while (be != outer);
+
+	/* find axes with longest distance */
+	dir = 0;
+	dirlen = -1.0;
+
+	for (i = 0; i < 3; i++) {
+		if (maxv[i] - minv[i] > dirlen) {
+			dir = i;
+			dirlen = maxv[i] - minv[i];
+		}
+	}
+
+	*pin1 = minvert[dir];
+	*pin2 = maxvert[dir];
+
+	p_chart_pin_positions(chart, pin1, pin2);
+}
+
 static void p_chart_extrema_verts(PChart *chart, PVert **pin1, PVert **pin2)
 {
 	double minv[3], maxv[3], dirlen;
@@ -3221,19 +3727,53 @@ static void p_chart_lscm_begin(PChart *chart, PBool live, PBool abf)
 
 		if (abf) {
 			printf("ABF solving...\n");
-			if (!p_chart_abf_solve(chart))
+			if (!p_chart_abf_solve(chart)) {
 				printf("ABF solving failed: falling back to LSCM.\n");
-			param_warning("ABF solving failed: falling back to LSCM.\n");
+				param_warning("ABF solving failed: falling back to LSCM.\n");
+			}
 		}
-
+		
 		if (npins <= 1) {
 			/* not enough pins, lets find some ourself */
 			PEdge *outer;
 
 			p_chart_boundaries(chart, NULL, &outer);
 
-			if (!p_chart_symmetry_pins(chart, outer, &pin1, &pin2))
-				p_chart_extrema_verts(chart, &pin1, &pin2);
+			if (false) {
+				if (!p_chart_symmetry_pins(chart, outer, &pin1, &pin2))
+					p_chart_extrema_verts(chart, &pin1, &pin2);
+			}
+			else {
+				if (true) {
+					p_chart_extrema_bnd_verts(chart, outer, &pin1, &pin2);
+				}
+				else {
+					char count = 0;
+
+					for (v = chart->verts; v; v = v->nextlink) {
+						if (fabs(v->co[1] + 1) < 0.1) {
+							if (count == 0) {
+								pin1 = v;
+								count++;
+							}
+							else {
+								pin2 = v;
+								break;
+							}
+						}
+					}
+				}
+
+
+				pin1->uv[0] = 0.5;
+				pin1->uv[1] = 0.0;
+				pin2->uv[0] = 0.5;
+				pin2->uv[1] = 1.0;
+
+				chart->flag |= PCHART_NOPACK;
+
+				//printf("\npin1: %d , pin2: %d\n", pin1->u.id, pin2->u.id);
+			}
 
 			chart->u.lscm.pin1 = pin1;
 			chart->u.lscm.pin2 = pin2;
@@ -3723,7 +4263,7 @@ static double p_chart_minimum_area_angle(PChart *chart)
 	minangle = 0.0;
 
 	while (rotated <= (M_PI / 2.0)) { /* INVESTIGATE: how far to rotate? */
-											 /* rotate with the smallest angle */
+									  /* rotate with the smallest angle */
 		i_min = 0;
 		mina = 1e10;
 
@@ -4458,7 +4998,7 @@ void param_edge_set_seam(ParamHandle *handle, ParamKey *vkeys)
 		e->flag |= PEDGE_SEAM;
 }
 
-void param_construct_end(ParamHandle *handle, ParamBool fill, ParamBool impl)
+void param_construct_end(ParamHandle *handle, ParamBool fill, ParamBool regardFill, ParamBool impl)
 {
 	PHandle *phandle = (PHandle *)handle;
 	PChart *chart = phandle->construction_chart;
@@ -4466,6 +5006,8 @@ void param_construct_end(ParamHandle *handle, ParamBool fill, ParamBool impl)
 	PEdge *outer;
 
 	param_assert(phandle->state == PHANDLE_STATE_ALLOCATED);
+
+	phandle->regardFill = regardFill;
 
 	phandle->ncharts = p_connect_pairs(phandle, (PBool)impl);
 	phandle->charts = p_split_charts(phandle, chart, phandle->ncharts);
@@ -4519,16 +5061,14 @@ void param_abf_begin(ParamHandle *handle)
 	for (i = 0; i < phandle->ncharts; i++) {
 		for (f = phandle->charts[i]->faces; f; f = f->nextlink)
 			p_face_backup_uvs(f);
-		p_chart_abf_begin(phandle->charts[i]);
 	}
 }
 
-void param_abf_solve(ParamHandle *handle)
+bool param_abf_solve(ParamHandle *handle)
 {
 	PHandle *phandle = (PHandle *)handle;
 	PChart *chart;
 	int i;
-	PBool result;
 
 	param_assert(phandle->state == PHANDLE_STATE_ABF);
 
@@ -4537,8 +5077,12 @@ void param_abf_solve(ParamHandle *handle)
 
 		if (!p_chart_abf_solve(chart)) {
 			// ERROR
+			printf("Could not compute ABF!\n");
+			return false;
 		}
 	}
+
+	return true;
 }
 
 void param_abf_end(ParamHandle *handle)

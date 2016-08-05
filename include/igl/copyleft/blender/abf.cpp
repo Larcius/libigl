@@ -10,6 +10,7 @@
 #include "BLI_alloca.h"
 #include <cassert>
 #include <iostream>
+#include <time.h>
 
 template <
 	typename DerivedV,
@@ -18,7 +19,8 @@ template <
 		const Eigen::PlainObjectBase<DerivedV> & V,
 		const Eigen::PlainObjectBase<DerivedF> & F,
 		Eigen::PlainObjectBase<DerivedV> & V_uv,
-		bool preFillHoles)
+		bool preFillHoles,
+		bool regardFill)
 {
 	using namespace std;
 	using namespace Eigen;
@@ -31,17 +33,21 @@ template <
 
 	add_faces<DerivedV, DerivedF>(handle, V, F, uv_all);
 
-	param_construct_end(handle, preFillHoles ? PARAM_TRUE : PARAM_FALSE, PARAM_FALSE);
+	clock_t startTime = clock();
 
-	if(true) {
-		param_abf_begin(handle);
-		param_abf_solve(handle);
-		param_abf_end(handle);
-	} else {
-		param_lscm_begin(handle, PARAM_FALSE, PARAM_TRUE);
-		param_lscm_solve(handle);
-		param_lscm_end(handle);
-	}
+	param_construct_end(handle, preFillHoles ? PARAM_TRUE : PARAM_FALSE, regardFill ? PARAM_TRUE : PARAM_FALSE, PARAM_FALSE);
+
+	//param_abf_begin(handle);
+	//if (!param_abf_solve(handle)) {
+	//	return false;
+	//}
+	//param_abf_end(handle);
+	
+	param_lscm_begin(handle, PARAM_FALSE, PARAM_TRUE);
+	param_lscm_solve(handle);
+	param_lscm_end(handle);
+
+	printf("\ntotal elapsed seconds: %f\n", ((double)clock() - startTime) / CLOCKS_PER_SEC);
 
 	//param_average(handle);
 	//param_pack(handle, 0, false);
@@ -148,5 +154,5 @@ template <
 
 #ifdef IGL_STATIC_LIBRARY
 //template bool igl::copyleft::abf_solve<Eigen::Matrix<double, -1, -1, 0, -1, -1>, Eigen::Matrix<int, -1, -1, 0, -1, -1> >(Eigen::PlainObjectBase<Eigen::Matrix<double, -1, -1, 0, -1, -1> > const&, Eigen::PlainObjectBase<Eigen::Matrix<int, -1, -1, 0, -1, -1> > const&, Eigen::PlainObjectBase<Eigen::Matrix<double, -1, -1, 0, -1, -1> > const&);
-template bool igl::copyleft::abf_solve<Eigen::Matrix<double, -1, -1, 0, -1, -1>, Eigen::Matrix<int, -1, -1, 0, -1, -1> >(Eigen::PlainObjectBase<Eigen::Matrix<double, -1, -1, 0, -1, -1> > const&, Eigen::PlainObjectBase<Eigen::Matrix<int, -1, -1, 0, -1, -1> > const&, Eigen::PlainObjectBase<Eigen::Matrix<double, -1, -1, 0, -1, -1> >&, bool);
+template bool igl::copyleft::abf_solve<Eigen::Matrix<double, -1, -1, 0, -1, -1>, Eigen::Matrix<int, -1, -1, 0, -1, -1> >(Eigen::PlainObjectBase<Eigen::Matrix<double, -1, -1, 0, -1, -1> > const&, Eigen::PlainObjectBase<Eigen::Matrix<int, -1, -1, 0, -1, -1> > const&, Eigen::PlainObjectBase<Eigen::Matrix<double, -1, -1, 0, -1, -1> >&, bool, bool);
 #endif

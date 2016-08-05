@@ -27,6 +27,7 @@ Eigen::MatrixXd& V_uv_grid = Eigen::MatrixXd();
 Eigen::MatrixXd& V_uv_lscm = Eigen::MatrixXd();
 Eigen::MatrixXd& V_uv_arap = Eigen::MatrixXd();
 Eigen::MatrixXd& V_uv_abf = Eigen::MatrixXd();
+Eigen::MatrixXd& V_uv_abf_regard = Eigen::MatrixXd();
 Eigen::MatrixXd& initial_guess = Eigen::MatrixXd();
 
 // be sure that these vectors aggree in size and order
@@ -35,26 +36,29 @@ std::vector<std::reference_wrapper<Eigen::MatrixXd>> methods = {
 	V_uv_lscm,
 	initial_guess,
 	V_uv_arap,
-	V_uv_abf
+	V_uv_abf,
+	V_uv_abf_regard
 };
 std::vector<std::string> methodNames = {
 	"Simple grid param",
 	"Least squares conformal map",
 	"Harmonic map",
 	"As-rigid-as-possible",
-	"Direct angle based flattening ++"
+	"Direct angle based flattening ++",
+	"Direct ABF++ (regarding fill)"
 };
 std::vector<std::string> methodAbbreviations = {
 	"grid param",
 	"LSCM",
 	"Harmonic map",
 	"ARAP",
-	"dABF++"
+	"dABF++",
+	"dABF++ (fill)"
 };
 
 // be sure that this vector is synchronized with the table
 std::vector<std::string> norms = {
-	"stretch",
+	"stretch-1",
 	"shear",
 	"angle",
 	"area"
@@ -64,10 +68,29 @@ std::vector<std::string> norms = {
 nanogui::ComboBox *parameterizationComboBox;
 #endif
 
+// Create a chess field texture
+void line_texture(Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> &texture_R,
+	Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> &texture_G,
+	Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> &texture_B)
+{
+	unsigned size = 512;
+	unsigned size2 = size / 2;
+	texture_R.setConstant(size, size, 128);
+	for (unsigned i = 0; i < size2; ++i)
+		for (unsigned j = 0; j < size2; ++j)
+			texture_R(i, j) = 255;
+	for (unsigned i = size2; i < size; ++i)
+		for (unsigned j = size2; j < size; ++j)
+			texture_R(i, j) = 255;
+
+	texture_G = texture_R;
+	texture_B = texture_R;
+}
+
 bool showUvMapping = false;
 int selectedMethod = 0;
 
-void showMesh() {
+void showMesh(bool setCenter) {
 	using namespace Eigen;
 
 #ifdef IGL_VIEWER_WITH_NANOGUI
@@ -85,27 +108,24 @@ void showMesh() {
 	{
 		viewer.data.set_mesh(viewer.data.V_uv, F);
 
-		MatrixXd V_uv_3(V.rows(), 3);
-		V_uv_3 << viewer.data.V_uv, MatrixXd::Zero(V.rows(), 1);
-
-		//viewer.core.model << Eigen::Matrix4f::Identity(4, 4);
-		viewer.core.align_camera_center(V_uv_3, F);
+		if (setCenter) {
+			MatrixXd V_uv_3(V.rows(), 3);
+			V_uv_3 << viewer.data.V_uv, MatrixXd::Zero(V.rows(), 1);
+			
+			//viewer.core.model << Eigen::Matrix4f::Identity(4, 4);
+			viewer.core.align_camera_center(V_uv_3, F);
+		}
 	}
 	else
 	{
 		viewer.data.set_mesh(V, F);
-		viewer.core.align_camera_center(V, F);
+
+		if (setCenter) {
+			viewer.core.align_camera_center(V, F);
+		}
 	}
 
 	viewer.data.compute_normals();
-}
-
-void showSelectedMethod() {
-	assert(selectedMethod >= 0 && selectedMethod < methods.size() && "Invalid method selection");
-
-	viewer.data.set_uv(methods[selectedMethod]);
-
-	showMesh();
 }
 
 void load(std::string fname) {
@@ -144,10 +164,13 @@ void load(std::string fname) {
 	F = viewer.data.F;
 	V_uv_grid = viewer.data.V_uv;
 
-	showUvMapping = false;
-
 	viewer.data.set_mesh(V, F);
 	viewer.data.set_uv(V_uv_grid);
+	
+	Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> texture_R, texture_G, texture_B;
+	line_texture(texture_R, texture_G, texture_B);
+	viewer.data.set_texture(texture_R, texture_B, texture_G);
+	
 	viewer.data.compute_normals();
 	viewer.core.align_camera_center(V, F);
 
@@ -202,7 +225,8 @@ void load(std::string fname) {
 
 	arap_solve(bc, arap_data, V_uv_arap);
 
-	igl::copyleft::abf_solve(V, F, V_uv_abf, true);
+	igl::copyleft::abf_solve(V, F, V_uv_abf, true, false);
+	igl::copyleft::abf_solve(V, F, V_uv_abf_regard, true, true);
 
 	// Scale UV for better comparison
 	double scaleFactor = 16;
@@ -262,7 +286,7 @@ void load(std::string fname) {
 		MatrixXd &V_uv = methods[i];
 
 		cout << (char)0xBA << " " << methodName << string(methodNameMaxLength - methodName.length(), ' ') << " " << (char)0xBA;
-		cout << " " << igl::compute_stretch_distortion(V_uv, V, F) << " " << (char)0xB3;
+		cout << " " << (igl::compute_stretch_distortion(V_uv, V, F)-1) << " " << (char)0xB3;
 		cout << " " << igl::compute_shear_distortion(V_uv, V, F) << " " << (char)0xB3;
 		cout << " " << igl::compute_angle_distortion(V_uv, V, F) << " " << (char)0xB3;
 		cout << " " << igl::compute_area_distortion(V_uv, V, F) << " " << (char)0xBA << endl;
@@ -270,7 +294,7 @@ void load(std::string fname) {
 
 	cout << (char)0xC8 << string(methodNameMaxLength + 2, (char)0xCD) << (char)0xCA << string(normsLength + 2, (char)0xCD) << (char)0xCA << string(normsLength + 2, (char)0xCD) << (char)0xCA << string(normsLength + 2, (char)0xCD) << (char)0xCA << string(normsLength + 2, (char)0xCD) << (char)0xBC << endl;
 
-	showSelectedMethod();
+	showMesh(true);
 }
 
 bool key_down(igl::viewer::Viewer& viewer, unsigned char key, int modifier)
@@ -282,12 +306,16 @@ bool key_down(igl::viewer::Viewer& viewer, unsigned char key, int modifier)
 
 
 	if (key == 'q') {
-		showUvMapping = false;
-		showMesh();
+		if (showUvMapping) {
+			showUvMapping = false;
+			showMesh(true);
+		}
 	}
 	else if (key == 'w') {
-		showUvMapping = true;
-		showMesh();
+		if (!showUvMapping) {
+			showUvMapping = true;
+			showMesh(true);
+		}
 	}
 	else if (key >= '1' && key <= '9') {
 		int selection = key - '1';
@@ -295,7 +323,7 @@ bool key_down(igl::viewer::Viewer& viewer, unsigned char key, int modifier)
 		if (selection < methods.size()) {
 			selectedMethod = selection;
 
-			showMesh();
+			showMesh(false);
 			return true;
 		}
 	}
@@ -328,7 +356,7 @@ void addCustomGUI(igl::viewer::Viewer& viewer) {
 
 		ngui->addButton("Save UV", [&]() {
 			showUvMapping = true;
-			showMesh();
+			showMesh(true);
 
 			viewer.open_dialog_save_mesh();
 		});
@@ -339,14 +367,14 @@ void addCustomGUI(igl::viewer::Viewer& viewer) {
 		parameterizationComboBox = new ComboBox(window, methodNames, methodAbbreviations);
 		parameterizationComboBox->setCallback([&](int selected) {
 			selectedMethod = selected;
-			showMesh();
+			showMesh(false);
 		});
 
 		ngui->addWidget("Method", parameterizationComboBox);
 		ngui->addVariable<bool>("show UV mapping", [&](bool checked)
 		{
 			showUvMapping = checked;
-			showMesh();
+			showMesh(true);
 		}, [&]()
 		{
 			return showUvMapping;

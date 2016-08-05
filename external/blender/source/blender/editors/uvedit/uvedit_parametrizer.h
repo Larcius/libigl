@@ -68,7 +68,7 @@ void param_face_add(ParamHandle *handle,
 void param_edge_set_seam(ParamHandle *handle,
                          ParamKey *vkeys);
 
-void param_construct_end(ParamHandle *handle, ParamBool fill, ParamBool impl);
+void param_construct_end(ParamHandle *handle, ParamBool fill, ParamBool regardFill, ParamBool impl);
 void param_delete(ParamHandle *chart);
 
 /* Least Squares Conformal Maps:
@@ -89,7 +89,7 @@ void param_lscm_end(ParamHandle *handle);
 /* Angle based flattening */
 
 void param_abf_begin(ParamHandle *handle);
-void param_abf_solve(ParamHandle *handle);
+bool param_abf_solve(ParamHandle *handle);
 void param_abf_end(ParamHandle *handle);
 
 /* Stretch */

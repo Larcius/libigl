@@ -54,7 +54,8 @@ namespace igl
 				const Eigen::PlainObjectBase<DerivedV> & V,
 				const Eigen::PlainObjectBase<DerivedF> & F,
 				Eigen::PlainObjectBase<DerivedV> & V_uv,
-				bool preFillHoles);
+				bool preFillHoles,
+				bool regardFill);
 	};
 };
 

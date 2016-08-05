@@ -45,15 +45,12 @@ int main(int argc, char *argv[])
 
 	printf("Load a mesh in OFF format\n");
 	// Load a mesh in OFF format
-	//igl::readOFF(TUTORIAL_SHARED_PATH "/camelhead.off", V, F);
-	igl::readOFF(TUTORIAL_SHARED_PATH "/own/1triangle.off", V, F);
-	//igl::readOFF(TUTORIAL_SHARED_PATH "/own/tetrahedron_bottomless.off", V, F);
-	//igl::readOFF(TUTORIAL_SHARED_PATH "/own/bunny_bottomless.off", V, F);
+	igl::readOFF(TUTORIAL_SHARED_PATH "/beetle.off", V, F);
 
-	igl::copyleft::abf_solve(V, F, V_uv, true);
+	igl::copyleft::abf_solve(V, F, V_uv, true, true);
 
 	// Scale UV to make the texture more clear
-	V_uv *= 20;
+	V_uv *= 10;
 
 	// Plot the mesh
 	igl::viewer::Viewer viewer;

@@ -1,4 +1,12 @@
-﻿#include <igl/copyleft/blender/abf.h>
+﻿// This file is part of libigl, a simple c++ geometry processing library.
+//
+// Copyright (C) 2016 Gabriel Cordes <gabriel.cordes@googlemail.com>
+//
+// This Source Code Form is subject to the terms of the Mozilla Public License
+// v. 2.0. If a copy of the MPL was not distributed with this file, You can
+// obtain one at http://mozilla.org/MPL/2.0/.
+
+#include <igl/copyleft/blender/abf.h>
 #include <igl/arap.h>
 #include <igl/lscm.h>
 #include <igl/boundary_loop.h>
@@ -8,6 +16,7 @@
 #include <nanogui/formhelper.h>
 #include <igl/file_dialog_open.h>
 
+#include <igl/is_flattenable.h>
 #include <igl/distortion.h>
 #include <iomanip>
 #include <string>
@@ -45,7 +54,7 @@ std::vector<std::string> methodNames = {
 	"Harmonic map",
 	"As-rigid-as-possible",
 	"Direct angle based flattening ++",
-	"Direct ABF++ (regarding fill)"
+	"Porous direct ABF++"
 };
 std::vector<std::string> methodAbbreviations = {
 	"grid param",
@@ -53,7 +62,7 @@ std::vector<std::string> methodAbbreviations = {
 	"Harmonic map",
 	"ARAP",
 	"dABF++",
-	"dABF++ (fill)"
+	"pdABF++"
 };
 
 // be sure that this vector is synchronized with the table
@@ -128,6 +137,16 @@ void showMesh(bool setCenter) {
 	viewer.data.compute_normals();
 }
 
+void clearData() {
+	viewer.data.clear();
+	V = viewer.data.V;
+	F = viewer.data.F;
+	V_uv_grid = viewer.data.V_uv;
+	initial_guess = viewer.data.V_uv;
+	V_uv_arap = viewer.data.V_uv;
+	V_uv_lscm = viewer.data.V_uv;
+}
+
 void load(std::string fname) {
 	using namespace std;
 	using namespace Eigen;
@@ -137,15 +156,6 @@ void load(std::string fname) {
 
 	cout << "loading " << fname << endl;
 
-	// clear everything
-	viewer.data.clear();
-	V = viewer.data.V;
-	F = viewer.data.F;
-	V_uv_grid = viewer.data.V_uv;
-	initial_guess = viewer.data.V_uv;
-	V_uv_arap = viewer.data.V_uv;
-	V_uv_lscm = viewer.data.V_uv;
-
 	//try {
 	//	...
 	//}
@@ -154,11 +164,45 @@ void load(std::string fname) {
 	//}
 
 	if (!viewer.load_mesh_from_file(fname.c_str())) {
-		viewer.data.clear();
-		throw exception("could not load object");
+		clearData();
+		cout << "could not load object" << endl;
+		//throw exception("could not load object");
+		return;
 	}
 
 	cout << "loaded" << endl;
+	
+	V = viewer.data.V;
+	F = viewer.data.F;
+
+	cout << "checking for flattenable surface" << endl;
+	short isFlattenable = igl::is_flattenable(V, F);
+	if (isFlattenable == 0) {
+		cout << "\tchecked" << endl;
+	}
+	else {
+		clearData();
+		cout << "not a flattenable surface:" << endl;
+
+		if (isFlattenable & igl::flattenable::NO_EDGE_MANIFOLD) {
+			cout << "\tnot an edge manifold" << endl;
+		}
+		if (isFlattenable & igl::flattenable::NO_VERTEX_MANIFOLD) {
+			cout << "\tnot a vertex manifold" << endl;
+		}
+		if (isFlattenable & igl::flattenable::NO_EULER_CHARACTERISTIC) {
+			cout << "\tEuler-Poincare characteristic does not hold" << endl;
+		}
+		if (isFlattenable & igl::flattenable::EMPTY_BOUNDARY) {
+			cout << "\tempty boundary" << endl;
+		}
+		if (isFlattenable & igl::flattenable::NOT_CONNECTED) {
+			cout << "\tnot connected" << endl;
+		}
+
+		//throw exception("not a flattenable surface");
+		return;
+	}
 
 	V = viewer.data.V;
 	F = viewer.data.F;
@@ -179,10 +223,6 @@ void load(std::string fname) {
 	VectorXi bnd;
 
 	igl::boundary_loop(F, bnd);
-
-	if (bnd.size() == 0) {
-		throw exception("object has no boundary (e.g. a sphere) and thus cannot be flattened");
-	}
 
 	cout << "boundary computed" << endl;
 
@@ -413,6 +453,8 @@ int main(int argc, char *argv[])
 
 	addCustomGUI(viewer);
 
+	clearData();
+	
 	// Launch the viewer
 	viewer.launch();
 }
